@@ -1,5 +1,5 @@
 # distutils: language = c++
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from cpython.mem cimport PyMem_Malloc, PyMem_Free
 cimport DracoPy
@@ -14,11 +14,21 @@ class MetadataObject:
 
 
 class AttributeMetadataObject(MetadataObject):
-    def __init__(self, unique_id: int,
+    def __init__(self, unique_id: int, element_size: int, 
                  entries: Dict[str, bytes] = None,
                  sub_metadatas: Dict[str, 'MetadataObject'] = None):
         super().__init__(entries, sub_metadatas)
         self.unique_id = unique_id
+        self.element_size = element_size
+        self.data: Dict[int, bytes] = {}
+
+
+class VerticesMetadataObject(AttributeMetadataObject):
+    pass
+
+
+class FacesMetadataObject(AttributeMetadataObject):
+    pass
 
 
 class GeometryMetadataObject(MetadataObject):
@@ -26,35 +36,61 @@ class GeometryMetadataObject(MetadataObject):
                  sub_metadatas: Dict[str, 'MetadataObject'] = None,
                  attribute_metadatas: List['AttributeMetadataObject'] = None):
         super().__init__(entries, sub_metadatas)
-        self.attribute_metadatas = attribute_metadatas if attribute_metadatas \
-            else []
+        self.attribute_metadatas = attribute_metadatas if attribute_metadatas else []
 
 
-def decode_metadata(binary_metadata: bytes) -> MetadataObject:
+def decode_metadata(binary_metadata: bytes,
+                    vertices: list, faces: list) -> Optional[MetadataObject]:
+    if not binary_metadata:
+        return None
     reader = new DracoPy.MetadataReader(binary_metadata)
     geometry_metadata = GeometryMetadataObject()
     to_parse_metadatas = [geometry_metadata]
     # consider attribute metadatas
-    attribute_metadatas_len = reader.read_uint()
+    vertices_attribtues = []
+    faces_attributes = []
+    attribute_metadatas_len = reader.read_uint32()
     for _ in range(attribute_metadatas_len):
-        unique_id = reader.read_uint()
-        attribute_metadata = AttributeMetadataObject(unique_id)
-        geometry_metadata.attribute_metadatas.append(attribute_metadata)
-        to_parse_metadatas.append(attribute_metadata)
+        unique_id = reader.read_uint32()
+        attribute_type = reader.read_uint32()
+        element_size = reader.read_uint32()
+        if attribute_type == 1:
+            attribute_metadata = VerticesMetadataObject(unique_id, element_size)
+            vertices_attribtues.append(attribute_metadata)
+            geometry_metadata.attribute_metadatas.append(attribute_metadata)
+        elif attribute_type == 2:
+            attribute_metadata = FacesMetadataObject(unique_id, element_size)
+            faces_attributes.append(attribute_metadata)
+            geometry_metadata.attribute_metadatas.append(attribute_metadata)
+        else:
+            pass
+            # other values are not supported
+    # if not faces_attributes:
+    #     raise Exception("faces python")
+    to_parse_metadatas.extend(geometry_metadata.attribute_metadatas)
+    # consider attribute metadatas geometry data
+    for v in range(len(vertices) // 3):
+        for attribute in vertices_attribtues:
+            value = reader.read_bytes(attribute.element_size)            
+            attribute.data[v] = value
+    for f in range(len(faces) // 3):
+        for attribute in faces_attributes:
+            value = reader.read_bytes(attribute.element_size)
+            attribute.data[f] = value
     # parse metadatas level by level
     while to_parse_metadatas:
         to_parse_metadata_next = []
         for metadata in to_parse_metadatas:
             # parse entries
-            entries_len = reader.read_uint()
+            entries_len = reader.read_uint32()
             for _ in range(entries_len):
-                name = reader.read_bytes()
-                value = reader.read_bytes()
+                name = reader.read_bytes_with_size()
+                value = reader.read_bytes_with_size()
                 metadata.entries[name] = value
-            sub_metadatas_len = reader.read_uint()
+            sub_metadatas_len = reader.read_uint32()
             # consider sub metadatas
             for _ in range(sub_metadatas_len):
-                name = reader.read_bytes()
+                name = reader.read_bytes_with_size()
                 sub_metadata = MetadataObject()
                 metadata.sub_metadatas[name] = sub_metadata
                 to_parse_metadata_next.append(sub_metadata)
@@ -66,22 +102,25 @@ def encode_metadata(geometry_metadata: GeometryMetadataObject) -> bytes:
     cdef DracoPy.MetadataWriter writer
     to_parse_metadata = [geometry_metadata]
     # consider attribute metadatas
-    writer.write_uint(len(geometry_metadata.attribute_metadatas))
+    writer.write_uint32(len(geometry_metadata.attribute_metadatas))
     for attribute_metadata in geometry_metadata.attribute_metadatas:
-        writer.write_uint(attribute_metadata.unique_id)
+        writer.write_uint32(attribute_metadata.unique_id)
         to_parse_metadata.append(attribute_metadata)
     # encode metadatas level by level
     while to_parse_metadata:
         to_parse_metadata_next = []
         for draco_metadata in to_parse_metadata:
             # encode entries
-            writer.write_uint(len(draco_metadata.entries))
+            writer.write_uint32(len(draco_metadata.entries))
             for name, value in draco_metadata.entries.items():
+                writer.write_uint32(len(name))
                 writer.write_bytes_from_str(name)
+                writer.write_uint32(len(value))
                 writer.write_bytes_from_vec(value)
             # consider sub metadatas
-            writer.write_uint(len(draco_metadata.sub_metadatas))
+            writer.write_uint32(len(draco_metadata.sub_metadatas))
             for name, draco_sub_metadata in draco_metadata.sub_metadatas.items():
+                writer.write_uint32(len(name))
                 writer.write_bytes_from_str(name)
                 to_parse_metadata_next.append(draco_sub_metadata)
     return writer.get()
@@ -95,7 +134,9 @@ class DracoPointCloud(object):
                 data_struct['quantization_range'], data_struct['quantization_origin'])
         else:
             self.encoding_options = None
-        self.metadata = decode_metadata(data_struct["binary_metadata"])
+        self.metadata = decode_metadata(data_struct["binary_metadata"],
+                                        data_struct["points"],
+                                        data_struct["faces"])
 
     def get_encoded_coordinate(self, value, axis):
         if self.encoding_options is not None:
@@ -241,6 +282,8 @@ def raise_decoding_error(decoding_status):
         raise ValueError('DracoPy only supports meshes with position attributes')
 
 def decode_buffer_to_mesh(buffer):
+    test_encoder()
+    return None
     mesh_struct = DracoPy.decode_buffer(buffer, len(buffer))
     if mesh_struct.decode_status == DracoPy.decoding_status.successful:
         return DracoMesh(mesh_struct)

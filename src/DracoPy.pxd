@@ -51,12 +51,13 @@ cdef extern from "DracoPy.h" namespace "DracoFunctions":
 
     cdef cppclass MetadataReader:
         MetadataReader(const string& s) except +
-        uint32_t read_uint() except +
-        string read_bytes() except +
+        uint32_t read_uint32() except +
+        string read_bytes(const uint32_t& size) except +
+        string read_bytes_with_size() except +
 
     cdef cppclass MetadataWriter:
         MetadataWriter() except +
-        void write_uint(const uint32_t& value) except +
+        void write_uint32(const uint32_t& value) except +
         void write_bytes_from_str(const string& value) except +
         void write_bytes_from_vec(const vector[uint8_t]& value) except +
         string get() except +
@@ -76,3 +77,5 @@ cdef extern from "DracoPy.h" namespace "DracoFunctions":
             int quantization_bits, int compression_level,
             float quantization_range, const float *quantization_origin,
             bool create_metadata) except +
+    
+    void test_encoder() except +
